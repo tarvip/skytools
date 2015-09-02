@@ -5,6 +5,7 @@ Walks tables by primary key and searches for missing inserts/updates/deletes.
 """
 
 import sys, os, skytools, subprocess
+from threading import Thread
 
 from londiste.syncer import Syncer
 
@@ -30,6 +31,7 @@ class Repairer(Syncer):
         """Initialize cmdline switches."""
         p = super(Repairer, self).init_optparse(p)
         p.add_option("--apply", action="store_true", help="apply fixes")
+        p.add_option("--parallel", action="store_true", help="dump source and target in parallel")
         return p
 
     def process_sync(self, t1, t2, src_db, dst_db):
@@ -64,11 +66,18 @@ class Repairer(Syncer):
         src_where = dst_where
 
         self.log.info("Dumping src table: %s", src_tbl)
-        self.dump_table(src_tbl, src_curs, dump_src, src_where)
-        src_db.commit()
+        src_dumper = Thread(target=self.dump_table, args=(src_tbl,src_curs,dump_src,src_where,src_db,))
+        src_dumper.daemon = True
+        src_dumper.start()
+        if not self.options.parallel:
+             src_dumper.join()
         self.log.info("Dumping dst table: %s", dst_tbl)
-        self.dump_table(dst_tbl, dst_curs, dump_dst, dst_where)
-        dst_db.commit()
+        dst_dumper = Thread(target=self.dump_table, args=(dst_tbl, dst_curs, dump_dst, dst_where, dst_db,))
+        dst_dumper.daemon = True
+        dst_dumper.start()
+        if self.options.parallel:
+            src_dumper.join()
+        dst_dumper.join()
 
         self.log.info("Sorting src table: %s", dump_src)
         self.do_sort(dump_src, dump_src_sorted)
@@ -132,7 +141,7 @@ class Repairer(Syncer):
         cols = ",".join(fqlist)
         self.log.debug("using columns: %s", cols)
 
-    def dump_table(self, tbl, curs, fn, whr):
+    def dump_table(self, tbl, curs, fn, whr, db):
         """Dump table to disk."""
         cols = ','.join(self.fq_common_fields)
         if len(whr) == 0:
@@ -144,6 +153,7 @@ class Repairer(Syncer):
         size = f.tell()
         f.close()
         self.log.info('%s: Got %d bytes', tbl, size)
+        db.commit()
 
     def get_row(self, ln):
         """Parse a row into dict."""
